@@ -1,4 +1,4 @@
-module github.com/gofiber/contrib/fiberzap/v2
+module github.com/kema-dev/fiber-contrib/fiberzap/v3
 
 go 1.21
 
