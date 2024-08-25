@@ -1,4 +1,4 @@
-module github.com/kema-dev/fiber-contrib/fiberzap/v3
+module github.com/kema-dev/fiber-contrib/fiberzap
 
 go 1.23
 
