@@ -17,7 +17,8 @@ type config struct {
 	Propagators            propagation.TextMapPropagator
 	SpanNameFormatter      func(fiber.Ctx) string
 	CustomAttributes       func(fiber.Ctx) []attribute.KeyValue
-	CustomMetricAttributes func(fiber.Ctx) []attribute.KeyValue
+	CustomTracesAttributes  func(fiber.Ctx) []attribute.KeyValue
+	CustomMetricsAttributes func(fiber.Ctx) []attribute.KeyValue
 	collectClientIP        bool
 }
 
@@ -82,6 +83,23 @@ func WithPort(port int) Option {
 	})
 }
 
+// WithCustomAttributes specifies a function that will be called on every
+// request and the returned attributes will be added to the all telemetry.
+// This is particularly useful to include attributes that needs redaction, such as:
+//
+//   - [User agent synthetic type]
+//   - [HTTP request headers]
+//   - [URL query parameters]
+//
+// [User agent synthetic type]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/user-agent/#user-agent-synthetic-type
+// [HTTP request headers]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/http/#http-request-header
+// [URL query parameters]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/url/#url-query
+func WithCustomAttributes(f func(ctx fiber.Ctx) []attribute.KeyValue) Option {
+	return optionFunc(func(cfg *config) {
+		cfg.CustomMetricsAttributes = f
+	})
+}
+
 // WithCustomTraceAttributes specifies a function that will be called on every
 // request and the returned attributes will be added to the span.
 // This is particularly useful to include attributes that needs redaction, such as:
@@ -95,15 +113,24 @@ func WithPort(port int) Option {
 // [URL query parameters]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/url/#url-query
 func WithCustomTraceAttributes(f func(ctx fiber.Ctx) []attribute.KeyValue) Option {
 	return optionFunc(func(cfg *config) {
-		cfg.CustomAttributes = f
+		cfg.CustomTracesAttributes = f
 	})
 }
 
 // WithCustomMetricAttributes specifies a function that will be called on every
 // request and the returned attributes will be added to the metrics.
+// This is particularly useful to include attributes that needs redaction, such as:
+//
+//   - [User agent synthetic type]
+//   - [HTTP request headers]
+//   - [URL query parameters]
+//
+// [User agent synthetic type]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/user-agent/#user-agent-synthetic-type
+// [HTTP request headers]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/http/#http-request-header
+// [URL query parameters]: https://opentelemetry.io/docs/specs/semconv/registry/attributes/url/#url-query
 func WithCustomMetricAttributes(f func(ctx fiber.Ctx) []attribute.KeyValue) Option {
 	return optionFunc(func(cfg *config) {
-		cfg.CustomMetricAttributes = f
+		cfg.CustomMetricsAttributes = f
 	})
 }
 

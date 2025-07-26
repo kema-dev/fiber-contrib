@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/utils/v2"
 	otelcontrib "go.opentelemetry.io/contrib"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
@@ -167,10 +168,10 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 	}
 
 	c.Locals(tracerKey, mw.tracer)
-	savedCtx := c.RequestCtx()
+	savedCtx := c
 	start := time.Now()
 
-	requestSize := mw.buildRequestAttributes(c)
+	requestBodySize := mw.buildRequestAttributes(c)
 
 	mw.instruments.httpServerActiveRequests.Add(
 		savedCtx,
@@ -197,11 +198,17 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 
 	statusCode := c.Response().StatusCode()
 
-	responseSize := mw.buildResponseAttributes(c, statusCode)
+	responseBodySize := mw.buildResponseAttributes(c, statusCode)
 
-	mw.finalizeSpan(span, statusCode, c)
+	attrs := mw.attributes.LowCardinalitySlice()
 
-	mw.recordMetrics(savedCtx, start, requestSize, responseSize)
+	if mw.config.CustomAttributes != nil {
+		attrs = append(attrs, mw.config.CustomAttributes(savedCtx)...)
+	}
+
+	mw.recordMetrics(savedCtx, start, requestBodySize, responseBodySize, attrs)
+
+	mw.finalizeSpan(c, span, statusCode, attrs)
 
 	mw.injectTracingHeaders(c, ctx)
 
@@ -250,39 +257,53 @@ func (mw *middleware) extractTracingContext(c fiber.Ctx, savedCtx context.Contex
 	return mw.config.Propagators.Extract(savedCtx, propagation.HeaderCarrier(reqHeader))
 }
 
-func (mw *middleware) finalizeSpan(span oteltrace.Span, statusCode int, c fiber.Ctx) {
-	span.SetAttributes(mw.attributes.ToSlice()...)
+func (mw *middleware) recordMetrics(
+	c fiber.Ctx,
+	start time.Time,
+	requestBodySize int64,
+	responseBodySize int64,
+	attrs []attribute.KeyValue,
+) {
+	if mw.config.CustomMetricsAttributes != nil {
+		attrs = append(attrs, mw.config.CustomMetricsAttributes(c)...)
+	}
+
+	duration := time.Since(start).Seconds()
+
+	mw.instruments.httpServerRequestDuration.Record(
+		c,
+		duration,
+		metric.WithAttributes(attrs...),
+	)
+	mw.instruments.httpServerRequestBodySize.Record(
+		c,
+		requestBodySize,
+		metric.WithAttributes(attrs...),
+	)
+	mw.instruments.httpServerResponseBodySize.Record(
+		c,
+		responseBodySize,
+		metric.WithAttributes(attrs...),
+	)
+}
+
+func (mw *middleware) finalizeSpan(
+	c fiber.Ctx,
+	span oteltrace.Span,
+	statusCode int,
+	attrs []attribute.KeyValue,
+) {
+	if mw.config.CustomTracesAttributes != nil {
+		attrs = append(attrs, mw.config.CustomTracesAttributes(c)...)
+	}
+
+	span.SetAttributes(attrs...)
 
 	if statusCode >= 400 {
 		span.SetStatus(codes.Error, http.StatusText(statusCode))
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
-}
-
-func (mw *middleware) recordMetrics(
-	savedCtx context.Context,
-	start time.Time,
-	requestBodySize int64,
-	responseBodySize int64,
-) {
-	duration := time.Since(start).Seconds()
-
-	mw.instruments.httpServerRequestDuration.Record(
-		savedCtx,
-		duration,
-		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
-	)
-	mw.instruments.httpServerRequestBodySize.Record(
-		savedCtx,
-		requestBodySize,
-		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
-	)
-	mw.instruments.httpServerResponseBodySize.Record(
-		savedCtx,
-		responseBodySize,
-		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
-	)
 }
 
 func (mw *middleware) injectTracingHeaders(c fiber.Ctx, ctx context.Context) {
