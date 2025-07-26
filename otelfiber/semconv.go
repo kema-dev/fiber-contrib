@@ -11,89 +11,156 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 )
 
-func getLowCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) []attribute.KeyValue {
-	attrs := []attribute.KeyValue{
-		translateHTTPMethodToSemconv(utils.CopyString(c.Method())),
-		semconv.ServerAddress(utils.CopyString(c.Hostname())),
-		semconv.HTTPRoute(utils.CopyString(c.Route().Path)),
-		semconv.NetworkTransportTCP,
+type lowCardinalityAttrs struct {
+	HTTPMethod             attribute.KeyValue
+	HTTPRoute              attribute.KeyValue
+	HTTPResponseStatusCode attribute.KeyValue
+	ServerAddress          attribute.KeyValue
+	ServerPort             attribute.KeyValue
+	NetworkTransport       attribute.KeyValue
+	NetworkProtocolName    attribute.KeyValue
+	NetworkProtocolVersion attribute.KeyValue
+	URLScheme              attribute.KeyValue
+}
+
+type highCardinalityAttrs struct {
+	URLPath              attribute.KeyValue
+	HTTPRequestBodySize  attribute.KeyValue
+	HTTPResponseBodySize attribute.KeyValue
+	UserAgentOriginal    attribute.KeyValue
+	EnduserID            attribute.KeyValue
+	ClientAddress        attribute.KeyValue
+	ClientPort           attribute.KeyValue
+}
+
+type allAttrs struct {
+	lowCardinality  lowCardinalityAttrs
+	highCardinality highCardinalityAttrs
+}
+
+func (attr allAttrs) ToSlice() []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, 16)
+	result = append(result, attr.LowCardinalitySlice()...)
+	result = append(result, attr.HighCardinalitySlice()...)
+	return result
+}
+
+func (attr allAttrs) LowCardinalitySlice() []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, 9)
+
+	if attr.lowCardinality.HTTPMethod.Key != "" {
+		result = append(result, attr.lowCardinality.HTTPMethod)
+	}
+	if attr.lowCardinality.HTTPRoute.Key != "" {
+		result = append(result, attr.lowCardinality.HTTPRoute)
+	}
+	if attr.lowCardinality.HTTPResponseStatusCode.Key != "" {
+		result = append(result, attr.lowCardinality.HTTPResponseStatusCode)
+	}
+	if attr.lowCardinality.ServerAddress.Key != "" {
+		result = append(result, attr.lowCardinality.ServerAddress)
+	}
+	if attr.lowCardinality.ServerPort.Key != "" {
+		result = append(result, attr.lowCardinality.ServerPort)
+	}
+	if attr.lowCardinality.NetworkTransport.Key != "" {
+		result = append(result, attr.lowCardinality.NetworkTransport)
+	}
+	if attr.lowCardinality.NetworkProtocolName.Key != "" {
+		result = append(result, attr.lowCardinality.NetworkProtocolName)
+	}
+	if attr.lowCardinality.NetworkProtocolVersion.Key != "" {
+		result = append(result, attr.lowCardinality.NetworkProtocolVersion)
+	}
+	if attr.lowCardinality.URLScheme.Key != "" {
+		result = append(result, attr.lowCardinality.URLScheme)
 	}
 
-	protocAttr := getProtocolAttrsFromRequest(c)
-	if len(protocAttr) > 0 {
-		attrs = append(attrs, protocAttr...)
+	return result
+}
+
+func (attr allAttrs) HighCardinalitySlice() []attribute.KeyValue {
+	result := make([]attribute.KeyValue, 0, 7)
+
+	if attr.highCardinality.URLPath.Key != "" {
+		result = append(result, attr.highCardinality.URLPath)
+	}
+	if attr.highCardinality.HTTPRequestBodySize.Key != "" {
+		result = append(result, attr.highCardinality.HTTPRequestBodySize)
+	}
+	if attr.highCardinality.HTTPResponseBodySize.Key != "" {
+		result = append(result, attr.highCardinality.HTTPResponseBodySize)
+	}
+	if attr.highCardinality.UserAgentOriginal.Key != "" {
+		result = append(result, attr.highCardinality.UserAgentOriginal)
+	}
+	if attr.highCardinality.EnduserID.Key != "" {
+		result = append(result, attr.highCardinality.EnduserID)
+	}
+	if attr.highCardinality.ClientAddress.Key != "" {
+		result = append(result, attr.highCardinality.ClientAddress)
+	}
+	if attr.highCardinality.ClientPort.Key != "" {
+		result = append(result, attr.highCardinality.ClientPort)
 	}
 
-	if cfg.Port != nil {
-		attrs = append(attrs, semconv.ServerPort(*cfg.Port))
+	return result
+}
+
+func getLowCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) lowCardinalityAttrs {
+	attrs := lowCardinalityAttrs{}
+
+	attrs.HTTPMethod = translateHTTPMethodToSemconv(utils.CopyString(c.Method()))
+	attrs.HTTPRoute = semconv.HTTPRoute(utils.CopyString(c.Route().Path))
+	attrs.ServerAddress = semconv.ServerAddress(utils.CopyString(c.Hostname()))
+	attrs.ServerPort = func() attribute.KeyValue {
+		if cfg.Port != nil {
+			return semconv.ServerPort(*cfg.Port)
+		}
+		return attribute.KeyValue{}
+	}()
+	attrs.NetworkTransport = semconv.NetworkTransportTCP
+
+	protoc := strings.Split(utils.CopyString(c.Protocol()), "/")
+	if len(protoc) == 2 {
+		attrs.NetworkProtocolName = semconv.NetworkProtocolName(protoc[0])
+		attrs.NetworkProtocolVersion = semconv.NetworkProtocolVersion(protoc[1])
+		attrs.URLScheme = semconv.URLScheme(protoc[0])
 	}
 
 	return attrs
 }
 
-func getAllAttrsFromRequest(
-	c fiber.Ctx,
-	cfg config,
-) []attribute.KeyValue {
-	attrs := getLowCardinalityAttrsFromRequest(c, cfg)
+func getHighCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) (highCardinalityAttrs, int64) {
+	attrs := highCardinalityAttrs{}
 
 	userAgent := utils.CopyBytes(c.Request().Header.UserAgent())
 
-	attrs = append(
-		attrs,
-		semconv.URLPath(string(utils.CopyBytes(c.Request().URI().Path()))),
-		semconv.URLOriginal(string(utils.CopyBytes(c.Request().URI().PathOriginal()))),
-		semconv.UserAgentOriginal(string(userAgent)),
+	attrs.URLPath = semconv.URLPath(string(utils.CopyBytes(c.Request().URI().Path())))
+	attrs.UserAgentOriginal = semconv.UserAgentOriginal(string(userAgent))
+
+	requestSize := int64(0)
+
+	attrs.HTTPRequestBodySize = semconv.HTTPRequestBodySize(
+		int(requestSize),
 	)
 
 	if username, ok := HasBasicAuth(utils.CopyString(c.Get(fiber.HeaderAuthorization))); ok {
-		attrs = append(attrs, semconv.EnduserID(utils.CopyString(username)))
+		attrs.EnduserID = semconv.EnduserID(utils.CopyString(username))
 	}
 
 	if cfg.collectClientIP {
 		clientIP := c.IP()
 		if len(clientIP) > 0 {
-			attrs = append(attrs, semconv.ClientAddress(utils.CopyString(clientIP)))
+			attrs.ClientAddress = semconv.ClientAddress(utils.CopyString(clientIP))
 		}
 
 		if clientPort, err := strconv.Atoi(utils.CopyString(c.Port())); err == nil {
-			attrs = append(attrs, semconv.ClientPort(clientPort))
+			attrs.ClientPort = semconv.ClientPort(clientPort)
 		}
 	}
 
-	return attrs
-}
-
-func httpServerMetricAttributesFromRequest(c fiber.Ctx, cfg config) []attribute.KeyValue {
-	attrs := getLowCardinalityAttrsFromRequest(c, cfg)
-
-	if cfg.CustomMetricAttributes != nil {
-		attrs = append(attrs, cfg.CustomMetricAttributes(c)...)
-	}
-
-	return attrs
-}
-
-func httpServerTraceAttributesFromRequest(c fiber.Ctx, cfg config) []attribute.KeyValue {
-	attrs := getAllAttrsFromRequest(c, cfg)
-
-	if cfg.CustomAttributes != nil {
-		attrs = append(attrs, cfg.CustomAttributes(c)...)
-	}
-
-	return attrs
-}
-
-func getProtocolAttrsFromRequest(c fiber.Ctx) []attribute.KeyValue {
-	protoc := strings.Split(utils.CopyString(c.Protocol()), "/")
-	if len(protoc) != 2 {
-		return nil
-	}
-	return []attribute.KeyValue{
-		semconv.NetworkProtocolName(protoc[0]),
-		semconv.URLScheme(protoc[0]),
-		semconv.NetworkProtocolVersion(protoc[1]),
-	}
+	return attrs, requestSize
 }
 
 func HasBasicAuth(auth string) (string, bool) {

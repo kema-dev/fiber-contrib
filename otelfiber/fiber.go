@@ -9,10 +9,10 @@ import (
 	"github.com/gofiber/utils/v2"
 	otelcontrib "go.opentelemetry.io/contrib"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
-	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -29,14 +29,30 @@ const (
 	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverresponsebodysize
 	MetricNameHttpServerResponseBodySize = "http.server.response.body.size"
 
-	// Unit constants for deprecated metric units
-	UnitDimensionless = "1"
-	UnitBytes         = "By"
-	UnitRequests      = "{request}"
-	UnitSeconds       = "s"
+	UnitSeconds  = "s"
+	UnitBytes    = "By"
+	UnitRequests = "{request}"
 )
 
-// Middleware returns fiber handler which will trace incoming requests.
+type instruments struct {
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestduration
+	httpServerRequestDuration metric.Float64Histogram
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserveractive_requests
+	httpServerActiveRequests metric.Int64UpDownCounter
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestbodysize
+	httpServerRequestBodySize metric.Int64Histogram
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverresponsebodysize
+	httpServerResponseBodySize metric.Int64Histogram
+}
+
+type middleware struct {
+	config      config
+	tracer      oteltrace.Tracer
+	instruments instruments
+	attributes  allAttrs
+}
+
+// Middleware returns fiber handler which will instrument incoming requests.
 func Middleware(opts ...Option) fiber.Handler {
 	cfg := config{
 		collectClientIP: true,
@@ -48,24 +64,59 @@ func Middleware(opts ...Option) fiber.Handler {
 	if cfg.TracerProvider == nil {
 		cfg.TracerProvider = otel.GetTracerProvider()
 	}
+	if cfg.MeterProvider == nil {
+		cfg.MeterProvider = otel.GetMeterProvider()
+	}
+	if cfg.Propagators == nil {
+		cfg.Propagators = otel.GetTextMapPropagator()
+	}
+	if cfg.SpanNameFormatter == nil {
+		cfg.SpanNameFormatter = defaultSpanNameFormatter
+	}
+
 	tracer := cfg.TracerProvider.Tracer(
 		instrumentationName,
 		oteltrace.WithInstrumentationVersion(otelcontrib.Version()),
 	)
 
-	if cfg.MeterProvider == nil {
-		cfg.MeterProvider = otel.GetMeterProvider()
-	}
 	meter := cfg.MeterProvider.Meter(
 		instrumentationName,
 		metric.WithInstrumentationVersion(otelcontrib.Version()),
 	)
 
+	instruments := initializeInstruments(meter)
+
+	mw := &middleware{
+		config:      cfg,
+		tracer:      tracer,
+		instruments: instruments,
+	}
+
+	return mw.handler
+}
+
+func initializeInstruments(meter metric.Meter) instruments {
 	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestduration
-	httpServerDuration, err := meter.Float64Histogram(
+	httpServerRequestDuration, err := meter.Float64Histogram(
 		MetricNameHttpServerRequestDuration,
 		metric.WithUnit(UnitSeconds),
 		metric.WithDescription("Duration of HTTP server requests."),
+		metric.WithExplicitBucketBoundaries(
+			0.005,
+			0.01,
+			0.025,
+			0.05,
+			0.075,
+			0.1,
+			0.25,
+			0.5,
+			0.75,
+			1.0,
+			2.5,
+			5.0,
+			7.5,
+			10.0,
+		),
 	)
 	if err != nil {
 		otel.Handle(err)
@@ -75,16 +126,14 @@ func Middleware(opts ...Option) fiber.Handler {
 	httpServerActiveRequests, err := meter.Int64UpDownCounter(
 		MetricNameHttpServerActiveRequests,
 		metric.WithUnit(UnitRequests),
-		metric.WithDescription(
-			"Number of active HTTP server requests.",
-		),
+		metric.WithDescription("Number of active HTTP server requests."),
 	)
 	if err != nil {
 		otel.Handle(err)
 	}
 
 	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestbodysize
-	httpServerRequestSize, err := meter.Int64Histogram(
+	httpServerRequestBodySize, err := meter.Int64Histogram(
 		MetricNameHttpServerRequestBodySize,
 		metric.WithUnit(UnitBytes),
 		metric.WithDescription("Size of HTTP server request bodies."),
@@ -94,7 +143,7 @@ func Middleware(opts ...Option) fiber.Handler {
 	}
 
 	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverresponsebodysize
-	httpServerResponseSize, err := meter.Int64Histogram(
+	httpServerResponseBodySize, err := meter.Int64Histogram(
 		MetricNameHttpServerResponseBodySize,
 		metric.WithUnit(UnitBytes),
 		metric.WithDescription("Size of HTTP server response bodies."),
@@ -103,102 +152,144 @@ func Middleware(opts ...Option) fiber.Handler {
 		otel.Handle(err)
 	}
 
-	if cfg.Propagators == nil {
-		cfg.Propagators = otel.GetTextMapPropagator()
+	return instruments{
+		httpServerRequestDuration:  httpServerRequestDuration,
+		httpServerActiveRequests:   httpServerActiveRequests,
+		httpServerRequestBodySize:  httpServerRequestBodySize,
+		httpServerResponseBodySize: httpServerResponseBodySize,
 	}
-	if cfg.SpanNameFormatter == nil {
-		cfg.SpanNameFormatter = defaultSpanNameFormatter
+}
+
+// handler is the actual middleware handler
+func (mw *middleware) handler(c fiber.Ctx) error {
+	if mw.config.Next != nil && mw.config.Next(c) {
+		return c.Next()
 	}
 
-	return func(c fiber.Ctx) error {
-		// Don't execute middleware if Next returns true
-		if cfg.Next != nil && cfg.Next(c) {
-			return c.Next()
-		}
+	c.Locals(tracerKey, mw.tracer)
+	savedCtx := c.RequestCtx()
+	start := time.Now()
 
-		c.Locals(tracerKey, tracer)
-		savedCtx, cancel := context.WithCancel(c.UserContext())
+	requestSize := mw.buildRequestAttributes(c)
 
-		start := time.Now()
+	mw.instruments.httpServerActiveRequests.Add(
+		savedCtx,
+		1,
+		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
+	)
 
-		requestMetricsAttrs := httpServerMetricAttributesFromRequest(c, cfg)
-		if !cfg.withoutMetrics {
-			httpServerActiveRequests.Add(savedCtx, 1, metric.WithAttributes(requestMetricsAttrs...))
-		}
+	ctx := mw.extractTracingContext(c, savedCtx)
 
-		responseMetricAttrs := make([]attribute.KeyValue, len(requestMetricsAttrs))
-		copy(responseMetricAttrs, requestMetricsAttrs)
+	spanName := mw.config.SpanNameFormatter(c)
 
-		reqHeader := make(http.Header)
-		c.Request().Header.VisitAll(func(k, v []byte) {
-			reqHeader.Add(string(k), string(v))
-		})
+	ctx, span := mw.tracer.Start(ctx, spanName,
+		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
+		oteltrace.WithAttributes(mw.attributes.ToSlice()...),
+	)
 
-		ctx := cfg.Propagators.Extract(savedCtx, propagation.HeaderCarrier(reqHeader))
+	c.SetUserContext(ctx)
 
-		opts := []oteltrace.SpanStartOption{
-			oteltrace.WithAttributes(httpServerTraceAttributesFromRequest(c, cfg)...),
-			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
-		}
+	err := c.Next()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 
-		// temporary set to c.Path() first
-		// update with c.Route().Path after c.Next() is called
-		// to get pathRaw
-		spanName := utils.CopyString(c.Path())
-		ctx, span := tracer.Start(ctx, spanName, opts...)
-		defer span.End()
+	statusCode := c.Response().StatusCode()
 
-		// pass the span through userContext
-		c.SetUserContext(ctx)
+	responseSize := mw.buildResponseAttributes(c, statusCode)
 
-		// serve the request to the next middleware
-		if err := c.Next(); err != nil {
-			span.RecordError(err)
-			// invokes the registered HTTP error handler
-			// to get the correct response status code
-			_ = c.App().Config().ErrorHandler(c, err)
-		}
+	mw.finalizeSpan(span, statusCode, c)
 
-		// extract common attributes from response
-		responseAttrs := []attribute.KeyValue{
-			semconv.HTTPResponseStatusCode(c.Response().StatusCode()),
-			semconv.HTTPRouteKey.String(c.Route().Path), // no need to copy c.Route().Path: route strings should be immutable across app lifecycle
-		}
+	mw.recordMetrics(savedCtx, start, requestSize, responseSize)
 
-		var responseSize int64
-		requestSize := int64(len(c.Request().Body()))
-		if c.GetRespHeader("Content-Type") != "text/event-stream" {
-			responseSize = int64(len(c.Response().Body()))
-		}
+	mw.injectTracingHeaders(c, ctx)
 
-		defer func() {
-			responseMetricAttrs = append(responseMetricAttrs, responseAttrs...)
+	span.End()
 
-			if !cfg.withoutMetrics {
-				httpServerActiveRequests.Add(savedCtx, -1, metric.WithAttributes(requestMetricsAttrs...))
-				httpServerDuration.Record(savedCtx, float64(time.Since(start).Microseconds())/1000, metric.WithAttributes(responseMetricAttrs...))
-				httpServerRequestSize.Record(savedCtx, requestSize, metric.WithAttributes(responseMetricAttrs...))
-				httpServerResponseSize.Record(savedCtx, responseSize, metric.WithAttributes(responseMetricAttrs...))
-			}
+	mw.instruments.httpServerActiveRequests.Add(
+		savedCtx,
+		-1,
+		metric.WithAttributes(mw.attributes.ToSlice()...),
+	)
 
-			c.SetUserContext(savedCtx)
-			cancel()
-		}()
+	return err
+}
 
-		span.SetAttributes(append(responseAttrs, semconv.HTTPResponseBodySizeKey.Int64(responseSize))...)
-		span.SetName(cfg.SpanNameFormatter(c))
+func (mw *middleware) buildRequestAttributes(c fiber.Ctx) int64 {
+	mw.attributes.lowCardinality = getLowCardinalityAttrsFromRequest(c, mw.config)
+	requestSize := int64(0)
+	mw.attributes.highCardinality, requestSize = getHighCardinalityAttrsFromRequest(c, mw.config)
+	return requestSize
+}
 
-		spanStatus, spanMessage := internal.SpanStatusFromHTTPStatusCodeAndSpanKind(c.Response().StatusCode(), oteltrace.SpanKindServer)
-		span.SetStatus(spanStatus, spanMessage)
+func (mw *middleware) buildResponseAttributes(c fiber.Ctx, statusCode int) int64 {
+	mw.attributes.lowCardinality.HTTPResponseStatusCode = semconv.HTTPResponseStatusCode(
+		statusCode,
+	)
 
-		//Propagate tracing context as headers in outbound response
-		tracingHeaders := make(propagation.HeaderCarrier)
-		cfg.Propagators.Inject(c.UserContext(), tracingHeaders)
-		for _, headerKey := range tracingHeaders.Keys() {
-			c.Set(headerKey, tracingHeaders.Get(headerKey))
-		}
+	responseSize := int64(0)
+	if c.GetRespHeader("Content-Type") != "text/event-stream" {
+		responseSize = int64(len(c.Response().Body()))
+		mw.attributes.highCardinality.HTTPResponseBodySize = semconv.HTTPResponseBodySize(
+			int(responseSize),
+		)
+	}
 
-		return nil
+	// This overrides HTTPRoute from request
+	mw.attributes.lowCardinality.HTTPRoute = semconv.HTTPRoute(c.Route().Path)
+
+	return responseSize
+}
+
+func (mw *middleware) extractTracingContext(c fiber.Ctx, savedCtx context.Context) context.Context {
+	reqHeader := make(http.Header)
+	c.Request().Header.VisitAll(func(k, v []byte) {
+		reqHeader.Add(utils.UnsafeString(k), utils.UnsafeString(v))
+	})
+	return mw.config.Propagators.Extract(savedCtx, propagation.HeaderCarrier(reqHeader))
+}
+
+func (mw *middleware) finalizeSpan(span oteltrace.Span, statusCode int, c fiber.Ctx) {
+	span.SetAttributes(mw.attributes.ToSlice()...)
+
+	if statusCode >= 400 {
+		span.SetStatus(codes.Error, http.StatusText(statusCode))
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+}
+
+func (mw *middleware) recordMetrics(
+	savedCtx context.Context,
+	start time.Time,
+	requestBodySize int64,
+	responseBodySize int64,
+) {
+	duration := time.Since(start).Seconds()
+
+	mw.instruments.httpServerRequestDuration.Record(
+		savedCtx,
+		duration,
+		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
+	)
+	mw.instruments.httpServerRequestBodySize.Record(
+		savedCtx,
+		requestBodySize,
+		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
+	)
+	mw.instruments.httpServerResponseBodySize.Record(
+		savedCtx,
+		responseBodySize,
+		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
+	)
+}
+
+func (mw *middleware) injectTracingHeaders(c fiber.Ctx, ctx context.Context) {
+	tracingHeaders := make(propagation.HeaderCarrier)
+	mw.config.Propagators.Inject(ctx, tracingHeaders)
+	for _, headerKey := range tracingHeaders.Keys() {
+		c.Set(headerKey, tracingHeaders.Get(headerKey))
 	}
 }
 
@@ -207,9 +298,8 @@ func Middleware(opts ...Option) fiber.Handler {
 //
 // [OpenTelemetry guidelines]: https://opentelemetry.io/docs/specs/semconv/http/http-spans/#name
 func defaultSpanNameFormatter(c fiber.Ctx) string {
-	method := utils.CopyString(string(c.Request().Header.Method()))
-
-	path := utils.CopyString(string(c.Route().Path))
+	method := utils.CopyString(c.Method())
+	path := utils.CopyString(c.Route().Path)
 
 	// Should never happen
 	if method == "" && path == "" {
