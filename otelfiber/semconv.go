@@ -123,9 +123,10 @@ func getLowCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) lowCardinalityAt
 
 	protoc := strings.Split(utils.CopyString(c.Protocol()), "/")
 	if len(protoc) == 2 {
-		attrs.NetworkProtocolName = semconv.NetworkProtocolName(protoc[0])
+		protocName := strings.ToLower(protoc[0])
+		attrs.URLScheme = semconv.URLScheme(protocName)
+		attrs.NetworkProtocolName = semconv.NetworkProtocolName(protocName)
 		attrs.NetworkProtocolVersion = semconv.NetworkProtocolVersion(protoc[1])
-		attrs.URLScheme = semconv.URLScheme(protoc[0])
 	}
 
 	return attrs
