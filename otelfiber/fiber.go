@@ -167,19 +167,19 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		return c.Next()
 	}
 
+	// Register tracer for subspans down the handlers chain
 	c.Locals(tracerKey, mw.tracer)
-	savedCtx := c
 	start := time.Now()
 
 	requestBodySize := mw.buildRequestAttributes(c)
 
 	mw.instruments.httpServerActiveRequests.Add(
-		savedCtx,
+		c,
 		1,
 		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
 	)
 
-	ctx := mw.extractTracingContext(c, savedCtx)
+	ctx := mw.extractTracingContext(c, c)
 
 	spanName := mw.config.SpanNameFormatter(c)
 
@@ -187,8 +187,6 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 		oteltrace.WithAttributes(mw.attributes.ToSlice()...),
 	)
-
-	c.SetUserContext(ctx)
 
 	err := c.Next()
 	if err != nil {
@@ -203,10 +201,10 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 	attrs := mw.attributes.LowCardinalitySlice()
 
 	if mw.config.CustomAttributes != nil {
-		attrs = append(attrs, mw.config.CustomAttributes(savedCtx)...)
+		attrs = append(attrs, mw.config.CustomAttributes(c)...)
 	}
 
-	mw.recordMetrics(savedCtx, start, requestBodySize, responseBodySize, attrs)
+	mw.recordMetrics(c, start, requestBodySize, responseBodySize, attrs)
 
 	mw.finalizeSpan(c, span, statusCode, attrs)
 
@@ -215,7 +213,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 	span.End()
 
 	mw.instruments.httpServerActiveRequests.Add(
-		savedCtx,
+		c,
 		-1,
 		metric.WithAttributes(mw.attributes.ToSlice()...),
 	)
