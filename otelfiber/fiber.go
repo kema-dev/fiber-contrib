@@ -2,18 +2,17 @@ package otelfiber
 
 import (
 	"context"
-	"github.com/gofiber/contrib/otelfiber/v2/internal"
 	"net/http"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/utils"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/utils/v2"
 	otelcontrib "go.opentelemetry.io/contrib"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
-	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -21,15 +20,20 @@ const (
 	tracerKey           = "gofiber-contrib-tracer-fiber"
 	instrumentationName = "github.com/gofiber/contrib/otelfiber"
 
-	MetricNameHttpServerDuration       = "http.server.duration"
-	MetricNameHttpServerRequestSize    = "http.server.request.size"
-	MetricNameHttpServerResponseSize   = "http.server.response.size"
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestduration
+	MetricNameHttpServerRequestDuration = "http.server.request.duration"
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserveractive_requests
 	MetricNameHttpServerActiveRequests = "http.server.active_requests"
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestbodysize
+	MetricNameHttpServerRequestBodySize = "http.server.request.body.size"
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverresponsebodysize
+	MetricNameHttpServerResponseBodySize = "http.server.response.body.size"
 
 	// Unit constants for deprecated metric units
 	UnitDimensionless = "1"
 	UnitBytes         = "By"
-	UnitMilliseconds  = "ms"
+	UnitRequests      = "{request}"
+	UnitSeconds       = "s"
 )
 
 // Middleware returns fiber handler which will trace incoming requests.
@@ -49,37 +53,54 @@ func Middleware(opts ...Option) fiber.Handler {
 		oteltrace.WithInstrumentationVersion(otelcontrib.Version()),
 	)
 
-	var httpServerDuration metric.Float64Histogram
-	var httpServerRequestSize metric.Int64Histogram
-	var httpServerResponseSize metric.Int64Histogram
-	var httpServerActiveRequests metric.Int64UpDownCounter
+	if cfg.MeterProvider == nil {
+		cfg.MeterProvider = otel.GetMeterProvider()
+	}
+	meter := cfg.MeterProvider.Meter(
+		instrumentationName,
+		metric.WithInstrumentationVersion(otelcontrib.Version()),
+	)
 
-	if !cfg.withoutMetrics {
-		if cfg.MeterProvider == nil {
-			cfg.MeterProvider = otel.GetMeterProvider()
-		}
-		meter := cfg.MeterProvider.Meter(
-			instrumentationName,
-			metric.WithInstrumentationVersion(otelcontrib.Version()),
-		)
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestduration
+	httpServerDuration, err := meter.Float64Histogram(
+		MetricNameHttpServerRequestDuration,
+		metric.WithUnit(UnitSeconds),
+		metric.WithDescription("Duration of HTTP server requests."),
+	)
+	if err != nil {
+		otel.Handle(err)
+	}
 
-		var err error
-		httpServerDuration, err = meter.Float64Histogram(MetricNameHttpServerDuration, metric.WithUnit(UnitMilliseconds), metric.WithDescription("measures the duration inbound HTTP requests"))
-		if err != nil {
-			otel.Handle(err)
-		}
-		httpServerRequestSize, err = meter.Int64Histogram(MetricNameHttpServerRequestSize, metric.WithUnit(UnitBytes), metric.WithDescription("measures the size of HTTP request messages"))
-		if err != nil {
-			otel.Handle(err)
-		}
-		httpServerResponseSize, err = meter.Int64Histogram(MetricNameHttpServerResponseSize, metric.WithUnit(UnitBytes), metric.WithDescription("measures the size of HTTP response messages"))
-		if err != nil {
-			otel.Handle(err)
-		}
-		httpServerActiveRequests, err = meter.Int64UpDownCounter(MetricNameHttpServerActiveRequests, metric.WithUnit(UnitDimensionless), metric.WithDescription("measures the number of concurrent HTTP requests that are currently in-flight"))
-		if err != nil {
-			otel.Handle(err)
-		}
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserveractive_requests
+	httpServerActiveRequests, err := meter.Int64UpDownCounter(
+		MetricNameHttpServerActiveRequests,
+		metric.WithUnit(UnitRequests),
+		metric.WithDescription(
+			"Number of active HTTP server requests.",
+		),
+	)
+	if err != nil {
+		otel.Handle(err)
+	}
+
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverrequestbodysize
+	httpServerRequestSize, err := meter.Int64Histogram(
+		MetricNameHttpServerRequestBodySize,
+		metric.WithUnit(UnitBytes),
+		metric.WithDescription("Size of HTTP server request bodies."),
+	)
+	if err != nil {
+		otel.Handle(err)
+	}
+
+	// https://opentelemetry.io/docs/specs/semconv/http/http-metrics/#metric-httpserverresponsebodysize
+	httpServerResponseSize, err := meter.Int64Histogram(
+		MetricNameHttpServerResponseBodySize,
+		metric.WithUnit(UnitBytes),
+		metric.WithDescription("Size of HTTP server response bodies."),
+	)
+	if err != nil {
+		otel.Handle(err)
 	}
 
 	if cfg.Propagators == nil {
@@ -89,7 +110,7 @@ func Middleware(opts ...Option) fiber.Handler {
 		cfg.SpanNameFormatter = defaultSpanNameFormatter
 	}
 
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		// Don't execute middleware if Next returns true
 		if cfg.Next != nil && cfg.Next(c) {
 			return c.Next()
@@ -182,7 +203,22 @@ func Middleware(opts ...Option) fiber.Handler {
 }
 
 // defaultSpanNameFormatter is the default formatter for spans created with the fiber
-// integration. Returns the route pathRaw
-func defaultSpanNameFormatter(ctx *fiber.Ctx) string {
-	return ctx.Route().Path
+// integration. It follows [OpenTelemetry guidelines]
+//
+// [OpenTelemetry guidelines]: https://opentelemetry.io/docs/specs/semconv/http/http-spans/#name
+func defaultSpanNameFormatter(c fiber.Ctx) string {
+	method := utils.CopyString(string(c.Request().Header.Method()))
+
+	path := utils.CopyString(string(c.Route().Path))
+
+	// Should never happen
+	if method == "" && path == "" {
+		return "_OTHER"
+	}
+
+	if method != "" && path != "" {
+		return method + " " + path
+	}
+
+	return method + path
 }
