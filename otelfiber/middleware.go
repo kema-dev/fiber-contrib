@@ -167,11 +167,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		return c.Next()
 	}
 
-	// Register tracer for subspans down the handlers chain
-	c.Locals(tracerKey, mw.tracer)
 	start := time.Now()
-
-	requestBodySize := mw.buildRequestAttributes(c)
 
 	mw.instruments.httpServerActiveRequests.Add(
 		c,
@@ -179,11 +175,13 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
 	)
 
-	ctx := mw.extractTracingContext(c, c)
+	requestBodySize := mw.buildRequestAttributes(c)
 
 	spanName := mw.config.SpanNameFormatter(c)
 
-	ctx, span := mw.tracer.Start(ctx, spanName,
+	parentCtx := mw.extractTracingContext(c, c)
+
+	ctx, span := mw.tracer.Start(parentCtx, spanName,
 		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 		oteltrace.WithAttributes(mw.attributes.ToSlice()...),
 	)
@@ -198,15 +196,15 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 
 	responseBodySize := mw.buildResponseAttributes(c, statusCode)
 
-	attrs := mw.attributes.LowCardinalitySlice()
+	lowCardAttrs := mw.attributes.LowCardinalitySlice()
 
 	if mw.config.CustomAttributes != nil {
-		attrs = append(attrs, mw.config.CustomAttributes(c)...)
+		lowCardAttrs = append(lowCardAttrs, mw.config.CustomAttributes(c)...)
 	}
 
-	mw.recordMetrics(c, start, requestBodySize, responseBodySize, attrs)
+	mw.recordMetrics(c, start, requestBodySize, responseBodySize, lowCardAttrs)
 
-	mw.finalizeSpan(c, span, statusCode, attrs)
+	mw.finalizeSpan(c, span, statusCode, lowCardAttrs)
 
 	mw.injectTracingHeaders(c, ctx)
 
@@ -215,7 +213,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 	mw.instruments.httpServerActiveRequests.Add(
 		c,
 		-1,
-		metric.WithAttributes(mw.attributes.ToSlice()...),
+		metric.WithAttributes(lowCardAttrs...),
 	)
 
 	return err
@@ -294,6 +292,8 @@ func (mw *middleware) finalizeSpan(
 	if mw.config.CustomTracesAttributes != nil {
 		attrs = append(attrs, mw.config.CustomTracesAttributes(c)...)
 	}
+
+	attrs = append(attrs, mw.attributes.HighCardinalitySlice()...)
 
 	span.SetAttributes(attrs...)
 
