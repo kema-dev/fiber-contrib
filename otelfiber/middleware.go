@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gofiber/contrib/otelfiber/v3/internal"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/utils/v2"
 	otelcontrib "go.opentelemetry.io/contrib"
@@ -297,11 +298,9 @@ func (mw *middleware) finalizeSpan(
 
 	span.SetAttributes(attrs...)
 
-	if statusCode >= 400 {
-		span.SetStatus(codes.Error, http.StatusText(statusCode))
-	} else {
-		span.SetStatus(codes.Ok, "")
-	}
+	span.SetStatus(
+		internal.SpanStatusFromHTTPStatusCodeAndSpanKind(statusCode, oteltrace.SpanKindServer),
+	)
 }
 
 func (mw *middleware) injectTracingHeaders(c fiber.Ctx, ctx context.Context) {

@@ -8,18 +8,6 @@ import (
 	"testing"
 )
 
-func TestIsCode4xxIsNotValid(t *testing.T) {
-	response := isCode4xx(http.StatusOK)
-
-	assert.False(t, response)
-}
-
-func TestIsCode4xxIsValid(t *testing.T) {
-	response := isCode4xx(http.StatusNotFound)
-
-	assert.True(t, response)
-}
-
 func TestStatusErrorWithMessage(t *testing.T) {
 	spanStatus, spanMessage := SpanStatusFromHTTPStatusCodeAndSpanKind(600, oteltrace.SpanKindClient)
 
