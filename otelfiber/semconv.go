@@ -140,11 +140,16 @@ func getHighCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) (highCardinalit
 	attrs.URLPath = semconv.URLPath(string(utils.CopyBytes(c.Request().URI().Path())))
 	attrs.UserAgentOriginal = semconv.UserAgentOriginal(string(userAgent))
 
-	requestSize := int64(0)
-
-	attrs.HTTPRequestBodySize = semconv.HTTPRequestBodySize(
-		int(requestSize),
-	)
+	requestBodySize := int64(0)
+	if c.Get("Content-Type") != "text/event-stream" {
+		head := utils.CopyString(c.Get(fiber.HeaderContentLength))
+		size, err := strconv.Atoi(head)
+		// Ignore body size calculation if convertion fails
+		if err == nil {
+			requestBodySize = int64(size)
+			attrs.HTTPRequestBodySize = semconv.HTTPRequestBodySize(size)
+		}
+	}
 
 	if username, ok := HasBasicAuth(utils.CopyString(c.Get(fiber.HeaderAuthorization))); ok {
 		attrs.EnduserID = semconv.EnduserID(utils.CopyString(username))
@@ -161,7 +166,7 @@ func getHighCardinalityAttrsFromRequest(c fiber.Ctx, cfg config) (highCardinalit
 		}
 	}
 
-	return attrs, requestSize
+	return attrs, requestBodySize
 }
 
 func HasBasicAuth(auth string) (string, bool) {

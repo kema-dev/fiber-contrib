@@ -2,9 +2,9 @@ package otelfiber
 
 import (
 	"context"
+	"strconv"
 	"time"
 
-	"github.com/gofiber/contrib/otelfiber/v3/internal"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/utils/v2"
 	otelcontrib "go.opentelemetry.io/contrib"
@@ -169,15 +169,15 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 
 	start := time.Now()
 
-	mw.instruments.httpServerActiveRequests.Add(
-		c,
-		1,
-		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
-	)
-
 	savedCtx := c.RequestCtx()
 
 	requestBodySize := mw.buildRequestAttributes(c)
+
+	mw.instruments.httpServerActiveRequests.Add(
+		c,
+		1,
+		metric.WithAttributeSet(attribute.NewSet(mw.attributes.LowCardinalitySlice()...)),
+	)
 
 	spanName := mw.config.SpanNameFormatter(c)
 
@@ -186,7 +186,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		oteltrace.WithAttributes(mw.attributes.ToSlice()...),
 	)
 
-	// Save trace context for use down the handlers chain
+	// Save tracer context for use down the handlers chain
 	fiber.Locals(c, tracerKey, childCtx)
 
 	err := c.Next()
@@ -216,7 +216,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 	mw.instruments.httpServerActiveRequests.Add(
 		c,
 		-1,
-		metric.WithAttributes(lowCardAttrs...),
+		metric.WithAttributeSet(attribute.NewSet(lowCardAttrs...)),
 	)
 
 	return err
@@ -224,9 +224,12 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 
 func (mw *middleware) buildRequestAttributes(c fiber.Ctx) int64 {
 	mw.attributes.lowCardinality = getLowCardinalityAttrsFromRequest(c, mw.config)
-	requestSize := int64(0)
-	mw.attributes.highCardinality, requestSize = getHighCardinalityAttrsFromRequest(c, mw.config)
-	return requestSize
+	requestBodySize := int64(0)
+	mw.attributes.highCardinality, requestBodySize = getHighCardinalityAttrsFromRequest(
+		c,
+		mw.config,
+	)
+	return requestBodySize
 }
 
 func (mw *middleware) buildResponseAttributes(c fiber.Ctx, statusCode int) int64 {
@@ -236,10 +239,15 @@ func (mw *middleware) buildResponseAttributes(c fiber.Ctx, statusCode int) int64
 
 	responseBodySize := int64(0)
 	if c.GetRespHeader("Content-Type") != "text/event-stream" {
-		responseBodySize = int64(len(c.Response().Body()))
-		mw.attributes.highCardinality.HTTPResponseBodySize = semconv.HTTPResponseBodySize(
-			int(responseBodySize),
-		)
+		head := utils.CopyString(c.GetRespHeader(fiber.HeaderContentLength))
+		size, err := strconv.Atoi(head)
+		// Ignore body size calculation if convertion fails
+		if err == nil {
+			responseBodySize = int64(size)
+			mw.attributes.highCardinality.HTTPResponseBodySize = semconv.HTTPResponseBodySize(
+				int(responseBodySize),
+			)
+		}
 	}
 
 	// This overrides HTTPRoute from request
@@ -268,17 +276,17 @@ func (mw *middleware) recordMetrics(
 	mw.instruments.httpServerRequestDuration.Record(
 		c,
 		duration,
-		metric.WithAttributes(attrs...),
+		metric.WithAttributeSet(attribute.NewSet(attrs...)),
 	)
 	mw.instruments.httpServerRequestBodySize.Record(
 		c,
 		requestBodySize,
-		metric.WithAttributes(attrs...),
+		metric.WithAttributeSet(attribute.NewSet(attrs...)),
 	)
 	mw.instruments.httpServerResponseBodySize.Record(
 		c,
 		responseBodySize,
-		metric.WithAttributes(attrs...),
+		metric.WithAttributeSet(attribute.NewSet(attrs...)),
 	)
 }
 
@@ -295,9 +303,11 @@ func (mw *middleware) finalizeSpan(
 	attrs = append(attrs, mw.attributes.HighCardinalitySlice()...)
 
 	span.SetAttributes(attrs...)
+	// Update name with values from response (e.g. HTTP route)
+	span.SetName(mw.config.SpanNameFormatter(c))
 
 	span.SetStatus(
-		internal.SpanStatusFromHTTPStatusCodeAndSpanKind(statusCode, oteltrace.SpanKindServer),
+		SpanStatusFromHTTPStatusCodeAndSpanKind(statusCode, oteltrace.SpanKindServer),
 	)
 }
 
