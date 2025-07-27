@@ -2,7 +2,6 @@ package otelfiber
 
 import (
 	"context"
-	"net/http"
 	"time"
 
 	"github.com/gofiber/contrib/otelfiber/v3/internal"
@@ -250,11 +249,7 @@ func (mw *middleware) buildResponseAttributes(c fiber.Ctx, statusCode int) int64
 }
 
 func (mw *middleware) extractTracingContext(c fiber.Ctx, savedCtx context.Context) context.Context {
-	reqHeader := make(http.Header)
-	c.Request().Header.VisitAll(func(k, v []byte) {
-		reqHeader.Add(utils.UnsafeString(k), utils.UnsafeString(v))
-	})
-	return mw.config.Propagators.Extract(savedCtx, propagation.HeaderCarrier(reqHeader))
+	return mw.config.Propagators.Extract(savedCtx, propagation.HeaderCarrier(c.GetReqHeaders()))
 }
 
 func (mw *middleware) recordMetrics(
