@@ -234,18 +234,18 @@ func (mw *middleware) buildResponseAttributes(c fiber.Ctx, statusCode int) int64
 		statusCode,
 	)
 
-	responseSize := int64(0)
+	responseBodySize := int64(0)
 	if c.GetRespHeader("Content-Type") != "text/event-stream" {
-		responseSize = int64(len(c.Response().Body()))
+		responseBodySize = int64(len(c.Response().Body()))
 		mw.attributes.highCardinality.HTTPResponseBodySize = semconv.HTTPResponseBodySize(
-			int(responseSize),
+			int(responseBodySize),
 		)
 	}
 
 	// This overrides HTTPRoute from request
 	mw.attributes.lowCardinality.HTTPRoute = semconv.HTTPRoute(c.Route().Path)
 
-	return responseSize
+	return responseBodySize
 }
 
 func (mw *middleware) extractTracingContext(c fiber.Ctx, savedCtx context.Context) context.Context {
