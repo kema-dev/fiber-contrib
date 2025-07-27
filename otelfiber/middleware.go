@@ -176,16 +176,19 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 		metric.WithAttributes(mw.attributes.LowCardinalitySlice()...),
 	)
 
+	savedCtx := c.RequestCtx()
+
 	requestBodySize := mw.buildRequestAttributes(c)
 
 	spanName := mw.config.SpanNameFormatter(c)
 
-	parentCtx := mw.extractTracingContext(c, c)
-
-	ctx, span := mw.tracer.Start(parentCtx, spanName,
+	childCtx, span := mw.tracer.Start(mw.extractTracingContext(c, savedCtx), spanName,
 		oteltrace.WithSpanKind(oteltrace.SpanKindServer),
 		oteltrace.WithAttributes(mw.attributes.ToSlice()...),
 	)
+
+	// Save trace context for use down the handlers chain
+	fiber.Locals(c, tracerKey, childCtx)
 
 	err := c.Next()
 	if err != nil {
@@ -207,7 +210,7 @@ func (mw *middleware) handler(c fiber.Ctx) error {
 
 	mw.finalizeSpan(c, span, statusCode, lowCardAttrs)
 
-	mw.injectTracingHeaders(c, ctx)
+	mw.injectTracingHeaders(c, childCtx)
 
 	span.End()
 
