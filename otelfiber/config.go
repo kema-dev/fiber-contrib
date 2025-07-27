@@ -135,7 +135,7 @@ func WithCustomMetricAttributes(f func(ctx fiber.Ctx) []attribute.KeyValue) Opti
 }
 
 // WithCollectClientIP specifies whether to collect the client's IP address
-// from the request. This is enabled by default.
+// from the request.
 func WithCollectClientIP(collect bool) Option {
 	return optionFunc(func(cfg *config) {
 		cfg.collectClientIP = collect
